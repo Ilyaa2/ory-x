@@ -70,7 +70,7 @@ func (mfs Migrations) SortAndFilter(dialect string, modifiers ...func(sort.Inter
 
 	vsf := make(Migrations, 0)
 	for k, v := range m {
-		if v.DBType == "all" {
+		if v.DBType == "all" && dialect != pop.NameYDB {
 			// Add "all" only if we can not find a more specific migration for the dialect.
 			var hasSpecific bool
 			for kk, vv := range m {

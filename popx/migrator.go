@@ -147,7 +147,17 @@ func (m *Migrator) UpTo(ctx context.Context, step int) (applied int, err error) 
 				return err
 			}
 
-			if mi.Runner != nil {
+			if mi.RunnerNoTx != nil {
+				l.Warn("Migration has requested running outside a transaction. Proceed with caution.")
+				if err := mi.RunnerNoTx(mi, c); err != nil {
+					return err
+				}
+
+				// #nosec G201 - mtn is a system-wide const
+				if err := c.RawQuery(fmt.Sprintf("INSERT INTO %s (version) VALUES (?)", mtn), mi.Version).Exec(); err != nil {
+					return errors.Wrapf(err, "problem inserting migration version %s. YOUR DATABASE MAY BE IN AN INCONSISTENT STATE! MANUAL INTERVENTION REQUIRED!", mi.Version)
+				}
+			} else {
 				err := m.isolatedTransaction(ctx, "up", func(conn *pop.Connection) error {
 					if err := mi.Runner(mi, conn, conn.TX); err != nil {
 						return err
@@ -161,16 +171,6 @@ func (m *Migrator) UpTo(ctx context.Context, step int) (applied int, err error) 
 				})
 				if err != nil {
 					return err
-				}
-			} else {
-				l.Warn("Migration has requested running outside a transaction. Proceed with caution.")
-				if err := mi.RunnerNoTx(mi, c); err != nil {
-					return err
-				}
-
-				// #nosec G201 - mtn is a system-wide const
-				if err := c.RawQuery(fmt.Sprintf("INSERT INTO %s (version) VALUES (?)", mtn), mi.Version).Exec(); err != nil {
-					return errors.Wrapf(err, "problem inserting migration version %s. YOUR DATABASE MAY BE IN AN INCONSISTENT STATE! MANUAL INTERVENTION REQUIRED!", mi.Version)
 				}
 			}
 
@@ -250,7 +250,17 @@ func (m *Migrator) Down(ctx context.Context, steps int) error {
 				return err
 			}
 
-			if mi.Runner != nil {
+			if mi.RunnerNoTx != nil {
+				err := mi.RunnerNoTx(mi, c)
+				if err != nil {
+					return err
+				}
+
+				// #nosec G201 - mtn is a system-wide const
+				if err := c.RawQuery(fmt.Sprintf("DELETE FROM %s WHERE version = ?", mtn), mi.Version).Exec(); err != nil {
+					return errors.Wrapf(err, "problem deleting migration version %s. YOUR DATABASE MAY BE IN AN INCONSISTENT STATE! MANUAL INTERVENTION REQUIRED!", mi.Version)
+				}
+			} else {
 				err := m.isolatedTransaction(ctx, "down", func(conn *pop.Connection) error {
 					err := mi.Runner(mi, conn, conn.TX)
 					if err != nil {
@@ -266,16 +276,6 @@ func (m *Migrator) Down(ctx context.Context, steps int) error {
 				})
 				if err != nil {
 					return err
-				}
-			} else {
-				err := mi.RunnerNoTx(mi, c)
-				if err != nil {
-					return err
-				}
-
-				// #nosec G201 - mtn is a system-wide const
-				if err := c.RawQuery(fmt.Sprintf("DELETE FROM %s WHERE version = ?", mtn), mi.Version).Exec(); err != nil {
-					return errors.Wrapf(err, "problem deleting migration version %s. YOUR DATABASE MAY BE IN AN INCONSISTENT STATE! MANUAL INTERVENTION REQUIRED!", mi.Version)
 				}
 			}
 
@@ -295,6 +295,42 @@ func (m *Migrator) Reset(ctx context.Context) error {
 	return m.Up(ctx)
 }
 
+func (m *Migrator) execYdbMigrations(ctx context.Context, c *pop.Connection, statements []string) error {
+	span, ctx := m.startSpan(ctx, MigrationRunTransactionOpName)
+	defer span.End()
+	span.SetAttributes(attribute.String("migration_direction", "init"))
+
+	if m.PerMigrationTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.PerMigrationTimeout)
+		defer cancel()
+	}
+
+	for _, stmt := range statements {
+		if _, err := c.Store.ExecContext(ctx, stmt); err != nil {
+			return errors.Wrapf(err, "unable to execute statement: %s", stmt)
+		}
+	}
+	return nil
+}
+
+func (m *Migrator) createMigrationTableForYdb(ctx context.Context, c *pop.Connection, l *logrusx.Logger) error {
+	mtn := m.sanitizedMigrationTableName(c)
+	unprefixedMtn := m.sanitizedMigrationTableName(c)
+	statements := []string{
+		fmt.Sprintf(`CREATE TABLE %s (version Utf8 NOT NULL, version_self INT64 NOT NULL DEFAULT 0, PRIMARY KEY(version))`, mtn),
+		fmt.Sprintf(`ALTER TABLE %s ADD INDEX %s_version_self_idx GLOBAL ON (version_self)`, mtn, unprefixedMtn),
+	}
+
+	if err := m.execYdbMigrations(ctx, c, statements); err != nil {
+		return err
+	}
+
+	l.WithField("migration_table", mtn).Debug("Transactional migration table created successfully.")
+
+	return nil
+}
+
 func (m *Migrator) createTransactionalMigrationTable(ctx context.Context, c *pop.Connection, l *logrusx.Logger) error {
 	mtn := m.sanitizedMigrationTableName(c)
 	unprefixedMtn := m.sanitizedMigrationTableName(c)
@@ -308,6 +344,31 @@ func (m *Migrator) createTransactionalMigrationTable(ctx context.Context, c *pop
 	}
 
 	l.WithField("migration_table", mtn).Debug("Transactional migration table created successfully.")
+
+	return nil
+}
+
+func (m *Migrator) migrateToMigrationTableForYdb(ctx context.Context, c *pop.Connection, l *logrusx.Logger) error {
+	// This means the new pop migrator has also not yet been applied, do that now.
+	mtn := m.sanitizedMigrationTableName(c)
+	unprefixedMtn := m.sanitizedMigrationTableName(c)
+
+	interimTable := fmt.Sprintf("%s_transactional", mtn)
+	statements := []string{
+		fmt.Sprintf(`ALTER TABLE %s DROP INDEX %s_version_idx%s`, mtn, unprefixedMtn),
+		fmt.Sprintf(`CREATE TABLE %s (version Utf8 NOT NULL, version_self INT64 NOT NULL DEFAULT 0, PRIMARY KEY(version))`, interimTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD INDEX %s_version_self_idx GLOBAL ON (version_self)`, unprefixedMtn, interimTable),
+		// #nosec G201 - mtn is a system-wide const
+		fmt.Sprintf(`INSERT INTO %s (version) SELECT version FROM %s`, interimTable, mtn),
+		fmt.Sprintf(`ALTER TABLE %s RENAME TO %s_pop_legacy`, mtn, mtn),
+		fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`, interimTable, mtn),
+	}
+
+	if err := m.execYdbMigrations(ctx, c, statements); err != nil {
+		return err
+	}
+
+	l.WithField("migration_table", mtn).Debug("Successfully migrated legacy schema_migration to new transactional schema_migration table.")
 
 	return nil
 }
@@ -411,6 +472,9 @@ func (m *Migrator) CreateSchemaMigrations(ctx context.Context) error {
 	if err != nil {
 		m.l.WithError(err).WithField("migration_table", mtn).Debug("An error occurred while checking for the legacy migration table, maybe it does not exist yet? Trying to create.")
 		// This means that the legacy pop migrator has not yet been applied
+		if c.Dialect.Name() == pop.NameYDB {
+			return m.createMigrationTableForYdb(ctx, c, m.l)
+		}
 		return m.createTransactionalMigrationTable(ctx, c, m.l)
 	}
 
@@ -418,6 +482,9 @@ func (m *Migrator) CreateSchemaMigrations(ctx context.Context) error {
 	_, err = c.Store.Exec(fmt.Sprintf("select version, version_self from %s", mtn))
 	if err != nil {
 		m.l.WithError(err).WithField("migration_table", mtn).Debug("An error occurred while checking for the transactional migration table, maybe it does not exist yet? Trying to create.")
+		if c.Dialect.Name() == pop.NameYDB {
+			return m.migrateToMigrationTableForYdb(ctx, c, m.l)
+		}
 		return m.migrateToTransactionalMigrationTable(ctx, c, m.l)
 	}
 
@@ -491,7 +558,8 @@ func (m *Migrator) sanitizedMigrationTableName(con *pop.Connection) string {
 func errIsTableNotFound(err error) bool {
 	return strings.Contains(err.Error(), "no such table:") || // sqlite
 		strings.Contains(err.Error(), "Error 1146") || // MySQL
-		strings.Contains(err.Error(), "SQLSTATE 42P01") // PostgreSQL / CockroachDB
+		strings.Contains(err.Error(), "SQLSTATE 42P01") || // PostgreSQL / CockroachDB
+		strings.Contains(err.Error(), "Cannot find table") // Ydb
 }
 
 // Status prints out the status of applied/pending migrations.

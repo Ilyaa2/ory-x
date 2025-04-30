@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tidwall/gjson"
-
 	"github.com/pkg/errors"
+	"github.com/tidwall/gjson"
+	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
 )
 
 // Duration represents a JSON and SQL compatible time.Duration.
@@ -138,7 +138,7 @@ func (ns *NullBool) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (ns NullBool) Value() (driver.Value, error) {
 	if !ns.Valid {
-		return nil, nil
+		return (*bool)(nil), nil
 	}
 	return ns.Bool, nil
 }
@@ -188,7 +188,7 @@ func (ns *FalsyNullBool) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (ns FalsyNullBool) Value() (driver.Value, error) {
 	if !ns.Valid {
-		return nil, nil
+		return (*bool)(nil), nil
 	}
 	return ns.Bool, nil
 }
@@ -246,7 +246,7 @@ func (ns *NullString) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (ns NullString) Value() (driver.Value, error) {
 	if len(ns) == 0 {
-		return sql.NullString{}.Value()
+		return (*string)(nil), nil
 	}
 	return sql.NullString{Valid: true, String: string(ns)}.Value()
 }
@@ -294,7 +294,11 @@ func (ns *NullTime) UnmarshalJSON(data []byte) error {
 
 // Value implements the driver Valuer interface.
 func (ns NullTime) Value() (driver.Value, error) {
-	return sql.NullTime{Valid: !time.Time(ns).IsZero(), Time: time.Time(ns)}.Value()
+	//return sql.NullTime{Valid: !time.Time(ns).IsZero(), Time: time.Time(ns)}.Value()
+	if time.Time(ns).IsZero() {
+		return (*time.Time)(nil), nil
+	}
+	return time.Time(ns), nil
 }
 
 // MapStringInterface represents a map[string]interface that works well with JSON, SQL, and Swagger.
@@ -404,7 +408,7 @@ func (m *NullJSONRawMessage) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (m NullJSONRawMessage) Value() (driver.Value, error) {
 	if len(m) == 0 {
-		return nil, nil
+		return (*string)(nil), nil
 	}
 	return string(m), nil
 }
@@ -438,13 +442,19 @@ func JSONScan(dst interface{}, value interface{}) error {
 }
 
 // JSONValue is a generic helper for retrieving a SQL JSON-encoded value.
-func JSONValue(src interface{}) (driver.Value, error) {
+func JSONValue(src interface{}, isYdb bool) (driver.Value, error) {
 	if src == nil {
+		if isYdb {
+			return types.NullableJSONDocumentValue((*string)(nil)), nil
+		}
 		return nil, nil
 	}
 	var b bytes.Buffer
 	if err := json.NewEncoder(&b).Encode(&src); err != nil {
 		return nil, err
+	}
+	if isYdb {
+		return types.JSONDocumentValue(b.String()), nil
 	}
 	return b.String(), nil
 }
@@ -471,7 +481,7 @@ func (ns *NullInt64) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (ns NullInt64) Value() (driver.Value, error) {
 	if !ns.Valid {
-		return nil, nil
+		return (*int64)(nil), nil
 	}
 	return ns.Int, nil
 }
@@ -520,7 +530,7 @@ func (ns *NullDuration) Scan(value interface{}) error {
 // Value implements the driver Valuer interface.
 func (ns NullDuration) Value() (driver.Value, error) {
 	if !ns.Valid {
-		return nil, nil
+		return (*time.Duration)(nil), nil
 	}
 	return int64(ns.Duration), nil
 }

@@ -29,6 +29,7 @@ func ParameterizedMigrationContent(params map[string]interface{}) func(mf Migrat
 				IsMySQL        bool
 				IsMariaDB      bool
 				IsPostgreSQL   bool
+				IsYdb          bool
 				DialectDetails *pop.ConnectionDetails
 				Parameters     map[string]interface{}
 			}{
@@ -37,6 +38,7 @@ func ParameterizedMigrationContent(params map[string]interface{}) func(mf Migrat
 				IsMySQL:        c.Dialect.Name() == "mysql",
 				IsMariaDB:      c.Dialect.Name() == "mariadb",
 				IsPostgreSQL:   c.Dialect.Name() == "postgres",
+				IsYdb:          c.Dialect.Name() == "ydb",
 				DialectDetails: c.Dialect.Details(),
 				Parameters:     params,
 			})

@@ -163,7 +163,24 @@ func NewMigrationBox(dir fs.FS, m *Migrator, opts ...MigrationBoxOption) (*Migra
 		}
 	}
 
-	err := mb.findMigrations(runner)
+	autoCommitRunner := func(b []byte) func(Migration, *pop.Connection) error {
+		return func(mf Migration, c *pop.Connection) error {
+			content, err := mb.migrationContent(mf, c, b, true)
+			if err != nil {
+				return errors.Wrapf(err, "error processing %s", mf.Path)
+			}
+			if isMigrationEmpty(content) {
+				m.l.WithField("migration", mf.Path).Trace("This is usually ok - ignoring migration because content is empty. This is ok!")
+				return nil
+			}
+			if err = c.RawQuery(content).Exec(); err != nil {
+				return errors.Wrapf(err, "error executing %s, sql: %s", mf.Path, content)
+			}
+			return nil
+		}
+	}
+
+	err := mb.findMigrations(runner, autoCommitRunner)
 	if err != nil {
 		return mb, err
 	}
@@ -178,7 +195,10 @@ func NewMigrationBox(dir fs.FS, m *Migrator, opts ...MigrationBoxOption) (*Migra
 	return mb, nil
 }
 
-func (fm *MigrationBox) findMigrations(runner func([]byte) func(mf Migration, c *pop.Connection, tx *pop.Tx) error) error {
+func (fm *MigrationBox) findMigrations(
+	runner func([]byte) func(mf Migration, c *pop.Connection, tx *pop.Tx) error,
+	runnerNoTx func([]byte) func(mf Migration, c *pop.Connection) error,
+) error {
 	return fs.WalkDir(fm.Dir, ".", func(p string, info fs.DirEntry, err error) error {
 		if err != nil {
 			return errors.WithStack(err)
@@ -219,8 +239,14 @@ func (fm *MigrationBox) findMigrations(runner func([]byte) func(mf Migration, c 
 			DBType:    match.DBType,
 			Direction: match.Direction,
 			Type:      match.Type,
-			Runner:    runner(content),
 		}
+
+		if fm.Connection.Dialect.Name() == pop.NameYDB {
+			mf.RunnerNoTx = runnerNoTx(content)
+		} else {
+			mf.Runner = runner(content)
+		}
+
 		fm.Migrations[mf.Direction] = append(fm.Migrations[mf.Direction], mf)
 		mod := sort.Interface(fm.Migrations[mf.Direction])
 		if mf.Direction == "down" {
