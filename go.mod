@@ -10,7 +10,7 @@ replace github.com/gobuffalo/nulls v0.4.2 => github.com/Ilyaa2/gobuffalo-nulls v
 
 replace github.com/gobuffalo/fizz v1.14.4 => github.com/Ilyaa2/fizz v0.0.0-20250422150209-ae5332e502b5
 
-replace github.com/gobuffalo/pop/v6 => github.com/Ilyaa2/pop/v6 v6.0.0-20250422153035-d5455fed1564
+replace github.com/gobuffalo/pop/v6 => github.com/Ilyaa2/pop/v6 v6.0.0-20250601123023-dfbd662656bb
 
 require (
 	code.dny.dev/ssrf v0.2.0
@@ -74,7 +74,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/profile v1.7.0
 	github.com/prometheus/client_golang v1.13.0
-	github.com/prometheus/client_model v0.3.0
+	github.com/prometheus/client_model v0.5.0
 	github.com/prometheus/common v0.37.0
 	github.com/rakutentech/jwk-go v1.1.3
 	github.com/rs/cors v1.11.0
@@ -134,7 +134,7 @@ require (
 	github.com/docker/cli v26.1.4+incompatible // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
-	github.com/dustin/go-humanize v1.0.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.17.0 // indirect
 	github.com/felixge/fgprof v0.9.3 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -212,7 +212,7 @@ require (
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/sourcegraph/annotate v0.0.0-20160123013949-f4cad6c6324d // indirect
 	github.com/sourcegraph/syntaxhighlight v0.0.0-20170531221838-bd320f5d308e // indirect
-	github.com/spf13/afero v1.9.5 // indirect
+	github.com/spf13/afero v1.10.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/viper v1.14.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
@@ -222,14 +222,17 @@ require (
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	github.com/xtgo/uuid v0.0.0-20140804021211-a0b114877d4c // indirect
+	github.com/yandex-cloud/go-genproto v0.0.0-20240819112322-98a264d392f6 // indirect
 	github.com/ydb-platform/ydb-go-genproto v0.0.0-20241112172322-ea1f63298f77 // indirect
+	github.com/ydb-platform/ydb-go-yc v0.12.3 // indirect
+	github.com/ydb-platform/ydb-go-yc-metadata v0.6.1 // indirect
 	go.mongodb.org/mongo-driver v1.10.3 // indirect
 	go.opentelemetry.io/otel/metric v1.21.0 // indirect
 	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	golang.org/x/image v0.18.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
-	golang.org/x/time v0.4.0 // indirect
+	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
