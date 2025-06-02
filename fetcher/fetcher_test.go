@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/ristretto"
+	"github.com/dgraph-io/ristretto/v2"
 	"github.com/hashicorp/go-retryablehttp"
 
 	"github.com/gobuffalo/httptest"
@@ -104,7 +104,7 @@ func TestFetcher(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 
-		cache, err := ristretto.NewCache(&ristretto.Config{
+		cache, err := ristretto.NewCache[[]byte, []byte](&ristretto.Config[[]byte, []byte]{
 			NumCounters: 100 * 10,
 			MaxCost:     100,
 			BufferItems: 64,

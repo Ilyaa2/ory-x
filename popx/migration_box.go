@@ -146,7 +146,7 @@ func NewMigrationBox(dir fs.FS, m *Migrator, opts ...MigrationBoxOption) (*Migra
 		mb = o(mb)
 	}
 
-	runner := func(b []byte) func(Migration, *pop.Connection, *pop.Tx) error {
+	txRunner := func(b []byte) func(Migration, *pop.Connection, *pop.Tx) error {
 		return func(mf Migration, c *pop.Connection, tx *pop.Tx) error {
 			content, err := mb.migrationContent(mf, c, b, true)
 			if err != nil {
@@ -180,7 +180,7 @@ func NewMigrationBox(dir fs.FS, m *Migrator, opts ...MigrationBoxOption) (*Migra
 		}
 	}
 
-	err := mb.findMigrations(runner, autoCommitRunner)
+	err := mb.findMigrations(txRunner, autoCommitRunner)
 	if err != nil {
 		return mb, err
 	}
@@ -208,7 +208,7 @@ func (fm *MigrationBox) findMigrations(
 			return nil
 		}
 
-		match, err := pop.ParseMigrationFilename(info.Name())
+		match, err := ParseMigrationFilename(info.Name())
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "unsupported dialect") {
 				fm.l.Tracef("This is usually ok - ignoring migration file %s because dialect is not supported: %s", info.Name(), err.Error())
@@ -233,15 +233,17 @@ func (fm *MigrationBox) findMigrations(
 		}
 
 		mf := Migration{
-			Path:      p,
-			Version:   match.Version,
-			Name:      match.Name,
-			DBType:    match.DBType,
-			Direction: match.Direction,
-			Type:      match.Type,
+			Path:       p,
+			Version:    match.Version,
+			Name:       match.Name,
+			DBType:     match.DBType,
+			Direction:  match.Direction,
+			Type:       match.Type,
+			Content:    string(content),
+			Autocommit: match.Autocommit,
 		}
 
-		if fm.Connection.Dialect.Name() == pop.NameYDB {
+		if fm.Connection.Dialect.Name() == pop.NameYDB || match.Autocommit {
 			mf.RunnerNoTx = runnerNoTx(content)
 		} else {
 			mf.Runner = runner(content)

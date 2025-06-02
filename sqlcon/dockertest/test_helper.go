@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
@@ -31,14 +30,6 @@ import (
 	"github.com/ory/x/stringsx"
 )
 
-// atexit := atexit.NewOnExit()
-// atexit.Add(func() {
-//	dockertest.KillAll()
-// })
-// atexit.Exit(testMain(m))
-
-// func WrapCleanup
-
 type dockerPool interface {
 	Purge(r *dockertest.Resource) error
 	Run(repository, tag string, env []string) (*dockertest.Resource, error)
@@ -46,33 +37,30 @@ type dockerPool interface {
 }
 
 var (
-	resources = []*dockertest.Resource{}
 	pool      dockerPool
+	resources []*dockertest.Resource
+	mux       sync.Mutex
 )
 
-func getPool() (dockerPool, error) {
-	if pool != nil {
-		return pool, nil
-	}
+func init() {
 	var err error
 	pool, err = dockertest.NewPool("")
-	return pool, err
+	if err != nil {
+		panic(err)
+	}
 }
 
 // KillAllTestDatabases deletes all test databases.
 func KillAllTestDatabases() {
-	pool, err := getPool()
-	if err != nil {
-		panic(err)
-	}
-
+	mux.Lock()
+	defer mux.Unlock()
 	for _, r := range resources {
 		if err := pool.Purge(r); err != nil {
 			log.Printf("Failed to purge resource: %s", err)
 		}
 	}
 
-	resources = []*dockertest.Resource{}
+	resources = nil
 }
 
 // Register sets up OnExit.
@@ -154,14 +142,11 @@ func ConnectPop(t require.TestingT, url string) (c *pop.Connection) {
 // ## PostgreSQL ##
 
 func startPostgreSQL(version string) (*dockertest.Resource, error) {
-	pool, err := getPool()
-	if err != nil {
-		return nil, errors.Wrap(err, "Could not connect to docker")
-	}
-
-	resource, err := pool.Run("postgres", stringsx.Coalesce(version, "11.8"), []string{"PGUSER=postgres", "POSTGRES_PASSWORD=secret", "POSTGRES_DB=postgres"})
+	resource, err := pool.Run("postgres", stringsx.Coalesce(version, "16"), []string{"PGUSER=postgres", "POSTGRES_PASSWORD=secret", "POSTGRES_DB=postgres"})
 	if err == nil {
+		mux.Lock()
 		resources = append(resources, resource)
+		mux.Unlock()
 	}
 	return resource, err
 }
@@ -235,14 +220,9 @@ func ConnectToTestPostgreSQLPop(t testing.TB) *pop.Connection {
 // ## MySQL ##
 
 func startMySQL(version string) (*dockertest.Resource, error) {
-	pool, err := getPool()
-	if err != nil {
-		return nil, errors.Wrap(err, "Could not connect to docker")
-	}
-
 	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
 		Repository: "mysql",
-		Tag:        stringsx.Coalesce(version, "8.0.26"),
+		Tag:        stringsx.Coalesce(version, "8.0"),
 		Env: []string{
 			"MYSQL_ROOT_PASSWORD=secret",
 			"MYSQL_ROOT_HOST=%",
@@ -251,7 +231,9 @@ func startMySQL(version string) (*dockertest.Resource, error) {
 	if err != nil {
 		return nil, err
 	}
+	mux.Lock()
 	resources = append(resources, resource)
+	mux.Unlock()
 	return resource, nil
 }
 
@@ -327,18 +309,15 @@ func ConnectToTestMySQLPop(t testing.TB) *pop.Connection {
 // ## CockroachDB
 
 func startCockroachDB(version string) (*dockertest.Resource, error) {
-	pool, err := getPool()
-	if err != nil {
-		return nil, errors.Wrap(err, "Could not connect to docker")
-	}
-
 	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
 		Repository: "cockroachdb/cockroach",
-		Tag:        stringsx.Coalesce(version, "v20.2.5"),
+		Tag:        stringsx.Coalesce(version, "latest-v24.2"),
 		Cmd:        []string{"start-single-node", "--insecure"},
 	})
 	if err == nil {
+		mux.Lock()
 		resources = append(resources, resource)
+		mux.Unlock()
 	}
 	return resource, err
 }
@@ -477,14 +456,14 @@ func DumpSchema(ctx context.Context, t *testing.T, db string) string {
 		t.FailNow()
 	}
 
-	process, err := cli.ContainerExecCreate(ctx, containers[0].ID, types.ExecConfig{
+	process, err := cli.ContainerExecCreate(ctx, containers[0].ID, container.ExecOptions{
 		Tty:          true,
 		AttachStdout: true,
 		Cmd:          cmd,
 	})
 	require.NoError(t, err)
 
-	resp, err := cli.ContainerExecAttach(ctx, process.ID, types.ExecStartCheck{
+	resp, err := cli.ContainerExecAttach(ctx, process.ID, container.ExecAttachOptions{
 		Tty: true,
 	})
 	require.NoError(t, err)

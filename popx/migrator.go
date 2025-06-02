@@ -11,24 +11,22 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/gobuffalo/pop/v6"
-
 	"github.com/cockroachdb/cockroach-go/v2/crdb"
+	"github.com/gobuffalo/pop/v6"
+	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ory/x/cmdx"
-	"github.com/ory/x/otelx"
-
 	"github.com/ory/x/logrusx"
-
-	"github.com/pkg/errors"
+	"github.com/ory/x/otelx"
 )
 
 const (
@@ -92,7 +90,7 @@ func (m *Migrator) Up(ctx context.Context) error {
 // If step <= 0 all pending migrations are run.
 func (m *Migrator) UpTo(ctx context.Context, step int) (applied int, err error) {
 	span, ctx := m.startSpan(ctx, MigrationUpOpName)
-	defer span.End()
+	defer otelx.End(span, &err)
 
 	c := m.Connection.WithContext(ctx)
 	err = m.exec(ctx, func() error {
@@ -101,44 +99,39 @@ func (m *Migrator) UpTo(ctx context.Context, step int) (applied int, err error) 
 		for _, mi := range mfs {
 			l := m.l.WithField("version", mi.Version).WithField("migration_name", mi.Name).WithField("migration_file", mi.Path)
 
-			exists, err := c.Where("version = ?", mi.Version).Exists(mtn)
+			appliedMigrations := make([]string, 0, 2)
+			legacyVersion := mi.Version
+			if len(legacyVersion) > 14 {
+				legacyVersion = legacyVersion[:14]
+			}
+			err := c.RawQuery(fmt.Sprintf("SELECT version FROM %s WHERE version IN (?, ?)", mtn), mi.Version, legacyVersion).All(&appliedMigrations)
 			if err != nil {
 				return errors.Wrapf(err, "problem checking for migration version %s", mi.Version)
 			}
 
-			if exists {
+			if slices.Contains(appliedMigrations, mi.Version) {
 				l.Debug("Migration has already been applied, skipping.")
 				continue
 			}
 
-			if len(mi.Version) > 14 {
-				l.Debug("Migration has not been applied but it might be a legacy migration, investigating.")
+			if slices.Contains(appliedMigrations, legacyVersion) {
+				l.WithField("legacy_version", legacyVersion).WithField("migration_table", mtn).Debug("Migration has already been applied in a legacy migration run. Updating version in migration table.")
+				if err := m.isolatedTransaction(ctx, "init-migrate", func(conn *pop.Connection) error {
+					// We do not want to remove the legacy migration version or subsequent migrations might be applied twice.
+					//
+					// Do not activate the following - it is just for reference.
+					//
+					// if _, err := tx.Store.Exec(fmt.Sprintf("DELETE FROM %s WHERE version = ?", mtn), legacyVersion); err != nil {
+					//	return errors.Wrapf(err, "problem removing legacy version %s", mi.Version)
+					// }
 
-				legacyVersion := mi.Version[:14]
-				exists, err = c.Where("version = ?", legacyVersion).Exists(mtn)
-				if err != nil {
-					return errors.Wrapf(err, "problem checking for legacy migration version %s", legacyVersion)
+					// #nosec G201 - mtn is a system-wide const
+					err := conn.RawQuery(fmt.Sprintf("INSERT INTO %s (version) VALUES (?)", mtn), mi.Version).Exec()
+					return errors.Wrapf(err, "problem inserting migration version %s", mi.Version)
+				}); err != nil {
+					return err
 				}
-
-				if exists {
-					l.WithField("legacy_version", legacyVersion).WithField("migration_table", mtn).Debug("Migration has already been applied in a legacy migration run. Updating version in migration table.")
-					if err := m.isolatedTransaction(ctx, "init-migrate", func(conn *pop.Connection) error {
-						// We do not want to remove the legacy migration version or subsequent migrations might be applied twice.
-						//
-						// Do not activate the following - it is just for reference.
-						//
-						// if _, err := tx.Store.Exec(fmt.Sprintf("DELETE FROM %s WHERE version = ?", mtn), legacyVersion); err != nil {
-						//	return errors.Wrapf(err, "problem removing legacy version %s", mi.Version)
-						// }
-
-						// #nosec G201 - mtn is a system-wide const
-						err := conn.RawQuery(fmt.Sprintf("INSERT INTO %s (version) VALUES (?)", mtn), mi.Version).Exec()
-						return errors.Wrapf(err, "problem inserting migration version %s", mi.Version)
-					}); err != nil {
-						return err
-					}
-					continue
-				}
+				continue
 			}
 
 			l.Info("Migration has not yet been applied, running migration.")
@@ -181,9 +174,9 @@ func (m *Migrator) UpTo(ctx context.Context, step int) (applied int, err error) 
 			}
 		}
 		if applied == 0 {
-			m.l.Debugf("Migrations already up to date, nothing to apply")
+			m.l.Infof("Migrations already up to date, nothing to apply")
 		} else {
-			m.l.Debugf("Successfully applied %d migrations.", applied)
+			m.l.Infof("Successfully applied %d migrations.", applied)
 		}
 		return nil
 	})
@@ -355,7 +348,7 @@ func (m *Migrator) migrateToMigrationTableForYdb(ctx context.Context, c *pop.Con
 
 	interimTable := fmt.Sprintf("%s_transactional", mtn)
 	statements := []string{
-		fmt.Sprintf(`ALTER TABLE %s DROP INDEX %s_version_idx%s`, mtn, unprefixedMtn),
+		fmt.Sprintf(`ALTER TABLE %s DROP INDEX %s_version_idx`, mtn, unprefixedMtn),
 		fmt.Sprintf(`CREATE TABLE %s (version Utf8 NOT NULL, version_self INT64 NOT NULL DEFAULT 0, PRIMARY KEY(version))`, interimTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD INDEX %s_version_self_idx GLOBAL ON (version_self)`, unprefixedMtn, interimTable),
 		// #nosec G201 - mtn is a system-wide const
@@ -496,6 +489,7 @@ type MigrationStatus struct {
 	State   string `json:"state"`
 	Version string `json:"version"`
 	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 type MigrationStatuses []MigrationStatus
@@ -530,13 +524,34 @@ func (m MigrationStatuses) IDs() []string {
 	return ids
 }
 
-// In the context of a cobra.Command, use cmdx.PrintTable instead.
-func (m MigrationStatuses) Write(out io.Writer) error {
-	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', tabwriter.TabIndent)
-	_, _ = fmt.Fprintln(w, "Version\tName\tStatus\t")
+type writeOptions struct {
+	writeContents bool
+}
 
-	for _, mm := range m {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t\n", mm.Version, mm.Name, mm.State)
+func WithWriteContents() func(*writeOptions) {
+	return func(o *writeOptions) {
+		o.writeContents = true
+	}
+}
+
+// In the context of a cobra.Command, use cmdx.PrintTable instead.
+func (m MigrationStatuses) Write(out io.Writer, opts ...func(*writeOptions)) error {
+	o := &writeOptions{}
+	for _, f := range opts {
+		f(o)
+	}
+
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', tabwriter.TabIndent)
+	if !o.writeContents {
+		_, _ = fmt.Fprintln(w, "Version\tName\tStatus\t")
+		for _, mm := range m {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t\n", mm.Version, mm.Name, mm.State)
+		}
+	} else {
+		_, _ = fmt.Fprintln(w, "Version\tName\tStatus\tContent\t")
+		for _, mm := range m {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", mm.Version, mm.Name, mm.State, mm.Content)
+		}
 	}
 
 	return w.Flush()
@@ -574,10 +589,9 @@ func (m *Migrator) Status(ctx context.Context) (MigrationStatuses, error) {
 	if len(migrations) == 0 {
 		return nil, errors.Errorf("unable to find any migrations for dialect: %s", con.Dialect.Name())
 	}
-	m.sanitizedMigrationTableName(con)
 
-	var migrationRows []migrationRow
-	err := con.RawQuery(fmt.Sprintf("SELECT * FROM %s", m.sanitizedMigrationTableName(con))).All(&migrationRows)
+	alreadyApplied := make([]string, 0, len(migrations))
+	err := con.RawQuery(fmt.Sprintf("SELECT version FROM %s", m.sanitizedMigrationTableName(con))).All(&alreadyApplied)
 	if err != nil {
 		if errIsTableNotFound(err) {
 			// This means that no migrations have been applied and we need to apply all of them first!
@@ -595,17 +609,14 @@ func (m *Migrator) Status(ctx context.Context) (MigrationStatuses, error) {
 			State:   Pending,
 			Version: mf.Version,
 			Name:    mf.Name,
+			Content: mf.Content,
 		}
 
-		for _, mr := range migrationRows {
-			if mr.Version == mf.Version {
-				statuses[k].State = Applied
-				break
-			} else if len(mf.Version) > 14 {
-				if mr.Version == mf.Version[:14] {
-					statuses[k].State = Applied
-				}
-			}
+		if slices.ContainsFunc(alreadyApplied, func(applied string) bool {
+			return applied == mf.Version || (len(mf.Version) > 14 && applied == mf.Version[:14])
+		}) {
+			statuses[k].State = Applied
+			continue
 		}
 	}
 

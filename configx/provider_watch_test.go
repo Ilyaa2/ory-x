@@ -49,11 +49,11 @@ func assertNoOpenFDs(t require.TestingT, dir, name string) {
 	}
 	var b, be bytes.Buffer
 	// we are only interested in the file descriptors, so we use the `-F f` option
-	c := exec.Command("lsof", "-n", "-F", "f", filepath.Join(dir, name))
+	c := exec.Command("lsof", "-n", "-F", "f", "--", filepath.Join(dir, name))
 	c.Stdout = &b
 	c.Stderr = &be
 	exitErr := new(exec.ExitError)
-	require.ErrorAs(t, c.Run(), &exitErr, "got stout: %s\nstderr: %s", b.String(), be.String())
+	require.ErrorAsf(t, c.Run(), &exitErr, "File %q has open file descriptor.\nGot stout: %s\nstderr: %s", filepath.Join(dir, name), b.String(), be.String())
 	assert.Equal(t, 1, exitErr.ExitCode(), "got stout: %s\nstderr: %s", b.String(), be.String())
 }
 
@@ -223,7 +223,7 @@ func TestReload(t *testing.T) {
 
 		assertNoOpenFDs(t, dir, name)
 
-		for i := 0; i < 30; i++ {
+		for i := range 30 {
 			t.Run(fmt.Sprintf("iteration=%d", i), func(t *testing.T) {
 				expected := []string{"foo", "bar", "baz"}[i%3]
 				updateConfigFile(t, c, dir, name, "memory", "bar", expected)

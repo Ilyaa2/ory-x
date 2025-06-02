@@ -31,6 +31,10 @@ type Migration struct {
 	// RunnerNoTx function to run/execute the migration. NOT wrapped in a
 	// database transaction. Mutually exclusive with Runner.
 	RunnerNoTx func(Migration, *pop.Connection) error
+	// Content is the raw content of the migration file
+	Content string
+	// Autocommit is true if the migration should be run outside of a transaction
+	Autocommit bool
 }
 
 func (m Migration) Valid() error {
@@ -65,10 +69,11 @@ func (mfs Migrations) Swap(i, j int) {
 func (mfs Migrations) SortAndFilter(dialect string, modifiers ...func(sort.Interface) sort.Interface) Migrations {
 	// We need to sort mfs in order to push the dbType=="all" migrations
 	// to the back.
-	m := append(Migrations{}, mfs...)
+	m := make(Migrations, len(mfs))
+	copy(m, mfs)
 	sort.Sort(m)
 
-	vsf := make(Migrations, 0)
+	vsf := make(Migrations, 0, len(m))
 	for k, v := range m {
 		if v.DBType == "all" && dialect != pop.NameYDB {
 			// Add "all" only if we can not find a more specific migration for the dialect.

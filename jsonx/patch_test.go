@@ -108,9 +108,25 @@ func TestApplyJSONPatch(t *testing.T) {
 		require.Equal(t, expected, obj)
 	})
 	t.Run("case=patch denied path", func(t *testing.T) {
-		rawPatch := []byte(`[{"op": "replace", "path": "/Field1", "value": "bar"}]`)
+		for _, path := range []string{
+			"/Field1",
+			"/field1",
+			"/fIeld1",
+			"/FIELD1",
+		} {
+			t.Run("path="+path, func(t *testing.T) {
+				rawPatch := []byte(`[{"op": "replace", "path": "/Field1", "value": "bar"}]`)
+				obj := deepcopy.Copy(object).(TestType)
+				assert.Error(t, ApplyJSONPatch(rawPatch, &obj, path))
+				require.Equal(t, object, obj)
+			})
+		}
+	})
+	t.Run("case=patch denied sub-path", func(t *testing.T) {
+		rawPatch := []byte(`[{"op": "replace", "path": "/Field3/Field1", "value": true}]`)
 		obj := deepcopy.Copy(object).(TestType)
-		require.Error(t, ApplyJSONPatch(rawPatch, &obj, "/Field1"))
+		err := ApplyJSONPatch(rawPatch, &obj, "/Field3/**", "/Field1/*/Unknown")
+		require.Error(t, err)
 		require.Equal(t, object, obj)
 	})
 	t.Run("case=patch allowed path", func(t *testing.T) {
@@ -140,31 +156,26 @@ func TestApplyJSONPatch(t *testing.T) {
 
 	t.Run("suite=invalid patches", func(t *testing.T) {
 		cases := []struct {
-			name      string
-			patch     []byte
-			assertErr assert.ErrorAssertionFunc
+			name  string
+			patch []byte
 		}{{
-			name:      "test",
-			patch:     []byte(`[{"op": "test", "path": "/"}]`),
-			assertErr: assert.Error,
+			name:  "test",
+			patch: []byte(`[{"op": "test", "path": "/"}]`),
 		}, {
-			name:      "add",
-			patch:     []byte(`[{"op": "add", "path": "/"}]`),
-			assertErr: assert.NoError,
+			name:  "add",
+			patch: []byte(`[{"op": "add", "path": "/"}]`),
 		}, {
-			name:      "remove",
-			patch:     []byte(`[{"op": "add", "path": "/"}]`),
-			assertErr: assert.NoError,
+			name:  "remove",
+			patch: []byte(`[{"op": "remove"}]`),
 		}, {
-			name:      "replace",
-			patch:     []byte(`[{"op": "add", "path": "/"}]`),
-			assertErr: assert.NoError,
+			name:  "replace",
+			patch: []byte(`[{"op": "replace", "path": "/"}]`),
 		}}
 
 		for _, tc := range cases {
 			t.Run("case="+tc.name, func(t *testing.T) {
 				obj := &TestType{}
-				tc.assertErr(t, ApplyJSONPatch(tc.patch, &obj))
+				assert.Error(t, ApplyJSONPatch(tc.patch, &obj))
 			})
 		}
 	})

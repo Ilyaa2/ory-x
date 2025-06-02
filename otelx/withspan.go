@@ -7,9 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"runtime"
+	"strings"
 
+	pkgerrors "github.com/pkg/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -41,13 +46,23 @@ func WithSpan(ctx context.Context, name string, f func(context.Context) error, o
 // Usage:
 //
 //	func Divide(ctx context.Context, numerator, denominator int) (ratio int, err error) {
-//		ctx, span := tracer.Start(ctx, "my-operation")
+//		ctx, span := tracer.Start(ctx, "Divide")
 //		defer otelx.End(span, &err)
 //		if denominator == 0 {
 //			return 0, errors.New("cannot divide by zero")
 //		}
 //		return numerator / denominator, nil
 //	}
+//
+// During a panic, we don't fully conform to OpenTelemetry's semantic
+// conventions because that would require us to emit a span event to attach the
+// stacktrace and error type, and we don't want to do that. Instead, we set the
+// tags on the span directly.
+// https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-spans/
+//
+// For improved compatibility with Datadog, we also set some additional tags as
+// documented here:
+// https://docs.datadoghq.com/standard-attributes/?product=apm&search=error
 func End(span trace.Span, err *error) {
 	defer span.End()
 	if r := recover(); r != nil {
@@ -62,6 +77,18 @@ func End(span trace.Span, err *error) {
 }
 
 func setErrorStatusPanic(span trace.Span, recovered any) {
+	span.SetAttributes(
+		// OpenTelemetry says to add these attributes to an event, not the span
+		// itself. We don't want to do that, so we're adding them to the span
+		// directly.
+		semconv.ExceptionEscaped(true),
+		// OpenTelemetry describes "exception.stacktrace"  We don't love that,
+		// though, so we're using "error.stack" instead, like DataDog).
+		attribute.String("error.stack", stacktrace()),
+	)
+	if t := reflect.TypeOf(recovered); t != nil {
+		span.SetAttributes(semconv.ExceptionType(t.String()))
+	}
 	switch e := recovered.(type) {
 	case error:
 		span.SetStatus(codes.Error, "panic: "+e.Error())
@@ -76,6 +103,14 @@ func setErrorStatusPanic(span trace.Span, recovered any) {
 }
 
 func setErrorTags(span trace.Span, err error) {
+	span.SetAttributes(
+		attribute.String("error", err.Error()),
+		attribute.String("error.message", err.Error()),                        // DataDog compat
+		attribute.String("error.type", fmt.Sprintf("%T", errors.Unwrap(err))), // the innermost error type is the most useful here
+	)
+	if e := interface{ StackTrace() pkgerrors.StackTrace }(nil); errors.As(err, &e) {
+		span.SetAttributes(attribute.String("error.stack", fmt.Sprintf("%+v", e.StackTrace())))
+	}
 	if e := interface{ Reason() string }(nil); errors.As(err, &e) {
 		span.SetAttributes(attribute.String("error.reason", e.Reason()))
 	}
@@ -90,5 +125,24 @@ func setErrorTags(span trace.Span, err error) {
 			span.SetAttributes(attribute.String("error.details."+k, fmt.Sprintf("%v", v)))
 		}
 	}
-	span.SetAttributes(attribute.String("error", err.Error()))
+}
+
+func stacktrace() string {
+	pc := make([]uintptr, 5)
+	n := runtime.Callers(4, pc)
+	if n == 0 {
+		return ""
+	}
+	pc = pc[:n]
+	frames := runtime.CallersFrames(pc)
+
+	var builder strings.Builder
+	for {
+		frame, more := frames.Next()
+		fmt.Fprintf(&builder, "%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line)
+		if !more {
+			break
+		}
+	}
+	return builder.String()
 }
